@@ -11,7 +11,7 @@ def postgreSQL_schema_info(**db_config ):
     missing_params = required_params - db_config.keys()
 
     if missing_params:
-        return f"Missing parameters: {', '.join(missing_params)}"
+        return [],"", f"Missing parameters: {', '.join(missing_params)}"
 
     Db_info = []
     all_table_names = []

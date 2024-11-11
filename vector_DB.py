@@ -36,7 +36,11 @@ def create_vector_DB():
 
 
         model = SentenceTransformer('all-MiniLM-L6-v2')
-        schema_info, all_tables_names, error_msg = postgreSQL_schema_info()
+        schema_info, all_tables_names, error_msg = postgreSQL_schema_info(dbname='ibmhr',
+                user='postgres',
+                password='nopassword',
+                host='localhost',
+                port=5432)
         embeddings = []
         chunks = []
         if schema_info:
