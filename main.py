@@ -1,17 +1,20 @@
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, HTTPException
 from sqlalchemy.orm import relationship, sessionmaker, Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
-from models import Employee, JobInfo, Department, PerformanceInfo
+from models import DatabaseInfo, DatabaseInfoResponse
 from DB_schema import postgreSQL_schema_info, execute_query
+from typing import List
+from database import get_db, tabel_migrations
+from sqlalchemy.future import select
 import pandas as pd
 
 app = FastAPI()
-Base = declarative_base()
 
 
 # Database Configuration
-config = {
+employee_config = {
     'dbname': 'ibmhr',
     'user': 'postgres',
     'password': 'nopassword',
@@ -19,30 +22,17 @@ config = {
     'port': '5432',
 }
 
-# Format the database URL for SQLAlchemy
-DATABASE_URL = f"postgresql://{config['user']}:{config['password']}@{config['host']}:{config['port']}/{config['dbname']}"
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base.metadata.create_all(bind=engine)
 
-# Dependency to get DB Session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
 
 @app.on_event("startup")
-def server_startup():
-    print("Server started")
+async def startup():
+    print("SERVER is booting up")
+    # Create the database tables
+    await tabel_migrations()
+    print("SERVER is started")
 
-
-# FastAPI endpoint to view employees
-@app.get("/employees/")
-def get_employees(skip: int = 0, limit: int = 1000, db: Session = Depends(get_db)):
-    return db.query(Employee).offset(skip).limit(limit).all()
 
 @app.get("/schema_info/")
 def get_db_schema(db: Session = Depends(get_db)):
@@ -80,3 +70,13 @@ async def root():
 @app.get("/hello/{name}")
 async def say_hello(name: str):
     return {"message": f"Hello {name}"}
+
+
+
+@app.get("/database_forms/", response_model=List[DatabaseInfoResponse])
+async def get_all_database_info(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DatabaseInfo))
+    database_info = result.scalars().all()
+    if not database_info:
+        raise HTTPException(status_code=404, detail="No database info found.")
+    return database_info
