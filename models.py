@@ -21,6 +21,16 @@ class DatabaseInfo(Base):
     # Establish a one-to-many relationship with DatabaseCreds
     creds = relationship("DatabaseCreds", back_populates="database_info")
 
+class DatabaseCredsCreate(BaseModel):
+    database_info_id: int
+    db_type: str
+    connection_creds: dict
+
+class DatabaseCredsUpdate(BaseModel):
+    id: int
+    database_info_id: int
+    db_type: str
+    connection_creds: dict
 
 class DatabaseCreds(Base):
     __tablename__ = "database_creds"
