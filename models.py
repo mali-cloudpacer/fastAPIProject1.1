@@ -32,6 +32,11 @@ class DatabaseCredsUpdate(BaseModel):
     db_type: str
     connection_creds: dict
 
+class QueryRequest(BaseModel):
+    DatabaseCreds_id: int
+    query: str
+
+
 class DatabaseCreds(Base):
     __tablename__ = "database_creds"
 

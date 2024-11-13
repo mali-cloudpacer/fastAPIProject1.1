@@ -3,12 +3,13 @@ from sqlalchemy.orm import relationship, sessionmaker, Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
-from models import DatabaseInfo, DatabaseInfoResponse, DatabaseCredsCreate, DatabaseCreds, DatabaseCredsUpdate
+from models import DatabaseInfo, DatabaseInfoResponse, DatabaseCredsCreate, DatabaseCreds, DatabaseCredsUpdate, QueryRequest
 from DB_schema import postgreSQL_schema_info, execute_query
 from typing import List
 from database import get_db, tabel_migrations
 from sqlalchemy.future import select
 import pandas as pd
+from dataclasses import asdict
 import json
 import psycopg2
 
@@ -52,16 +53,27 @@ async def get_query(request: Request):
 
 
 
-@app.get("/runquery/{query}")
-async def run_query(query: str):
-    results, error_msg = execute_query(query=query, dbname='ibmhr',
-    user='postgres',
-    password='nopassword',
-    host='localhost',
-    port=5432)
 
-    return {"results":{"query_results": results, "query":query}, "Error_Msg": error_msg}
+@app.post("/runquery/")
+async def run_query(request: QueryRequest,  db: AsyncSession = Depends(get_db)):
+    # Validate query to ensure it's a SELECT statement only
+    query = request.query.strip()
+    if not query.lower().startswith("select"):
+        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed.")
 
+    result = await db.execute(select(DatabaseCreds).filter(DatabaseCreds.id == request.DatabaseCreds_id))
+    db_creds = result.scalars().first()
+    if db_creds is None:
+        raise HTTPException(status_code=404, detail="DatabaseCreds not found")
+
+
+    db_creds_data = {key: getattr(db_creds, key) for key in vars(db_creds) if not key.startswith('_')}
+    db_creds_data = db_creds_data['connection_creds']
+    db_creds_data['query'] = query
+
+    results, error_msg = execute_query(**db_creds_data)
+
+    return {"results": {"query_results": results, "query": query}, "Error_Msg": error_msg}
 
 
 @app.get("/")

@@ -94,7 +94,7 @@ def execute_query(** db_config):
 
     if missing_params:
         return f"Missing parameters: {', '.join(missing_params)}"
-    results = None
+    data_with_headers = None
     error_msg = ""
     try:
         # Establish a connection to the PostgreSQL database
@@ -106,9 +106,14 @@ def execute_query(** db_config):
             # Execute the query
             start_time = time.time()
             cursor.execute(query)
+            column_headers = [desc[0] for desc in cursor.description]  # Get column headers
             results = cursor.fetchall()  # Fetch the results
             conn.commit()
             print("Query executed successfully.")
+
+            # Combine headers with data
+            data_with_headers = [dict(zip(column_headers, row)) for row in results]
+
 
         except ProgrammingError as e:
             error_msg =f"Syntax error in SQL query: {e}"
@@ -135,7 +140,7 @@ def execute_query(** db_config):
         print(error_msg)
 
     finally:
-        return results, error_msg
+        return data_with_headers, error_msg
 
 
 
