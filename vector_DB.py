@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 from Decorators import run_in_background, run_in_background_async
 from models import DatabaseCreds, DB_type
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_db
+from database import get_db, get_db_sync
 from fastapi import Depends
+from sqlalchemy.orm import Session
 
 
 
@@ -25,9 +26,12 @@ from fastapi import Depends
 
 # llm = ChatOpenAI()
 # llm.invoke("Hello, world!")
-
-async def sync_schema_create_vector_DB(db_cred_obj: DatabaseCreds, db: AsyncSession = Depends(get_db)):
+@run_in_background
+def sync_schema_create_vector_DB(db_cred_id: int):
     print("sync_schema_create_vector_DB started")
+    db: Session = get_db_sync()
+    db_cred_obj = db.query(DatabaseCreds).filter(DatabaseCreds.id == db_cred_id).first()
+
     model, collection = None, None
     try:
         os.environ["HUGGINGFACEHUB_API_TOKEN"] = "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"
@@ -61,7 +65,7 @@ async def sync_schema_create_vector_DB(db_cred_obj: DatabaseCreds, db: AsyncSess
         if db_type == DB_type.PostgreSQL.value:
             try:
                 print("postgreSQL_schema_info calling")
-                schema_info, all_tables_names, error_msg = await postgreSQL_schema_info(db_cred_obj,db)
+                schema_info, all_tables_names, error_msg = postgreSQL_schema_info(db_cred_id)
                 print("postgreSQL_schema_info ended")
             except Exception as e:
                 schema_info, all_tables_names, error_msg = [],"",e

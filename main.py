@@ -205,12 +205,7 @@ async def create_database_creds(db_creds: DatabaseCredsCreate, db: AsyncSession 
             await session.commit()
             await session.refresh(db_creds_db)
 
-        task = asyncio.create_task(sync_schema_create_vector_DB(db_creds_db, db))
-        # Log or handle exceptions for the task
-        task.add_done_callback(
-            lambda t: print(f"Task completed with exception: {t.exception()}") if t.exception() else print(
-                "Task completed successfully")
-        )
+        sync_schema_create_vector_DB(db_creds_db.id)
 
         return JSONResponse(status_code=200, content={'Result': 'Database added successfully', 'Error': ''})
     else:
