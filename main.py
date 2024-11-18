@@ -1,17 +1,25 @@
 from fastapi import FastAPI, Depends, Request, HTTPException
+import subprocess, asyncio, asyncpg
 from sqlalchemy.orm import relationship, sessionmaker, Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
-from models import DatabaseInfo, DatabaseInfoResponse, DatabaseCredsCreate, DatabaseCreds, DatabaseCredsUpdate, QueryRequest
-from DB_schema import postgreSQL_schema_info, execute_query
+from starlette.responses import Response
+from stem.interpreter.help import response
+from fastapi.responses import JSONResponse
+
+from models import (DatabaseInfo, DatabaseInfoResponse, DatabaseCredsCreate,
+                    DatabaseCreds, DatabaseCredsUpdate, QueryRequest, DB_type, ConnectionStructureRequest)
+from DB_schema import postgreSQL_schema_info, postgresql_execute_query
 from typing import List
-from database import get_db, tabel_migrations
+from database import get_db, tabel_creation
 from sqlalchemy.future import select
 import pandas as pd
 from dataclasses import asdict
 import json
 import psycopg2
+from vector_DB import sync_schema_create_vector_DB
+from DB_schema import check_schema_changes, get_current_schema_hash_postgresql
 
 app = FastAPI()
 
@@ -26,26 +34,64 @@ employee_config = {
 }
 
 
+def make_migration():
+    """Generates a new migration file if model changes are detected."""
+    try:
+        result = subprocess.run(
+            ["alembic", "revision", "--autogenerate", "-m", "auto migration"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        output = result.stdout + result.stderr
+        print("auto Migration output: ",output)
+        if "No changes in schema detected".lower() in str(output):
+            print("No schema changes detected. Skipping migration file creation.")
+            return False
+        elif result.returncode == 0:
+            print("Migration file created successfully.")
+            return True
+        else:
+            print("Error generating migration:", output)
+            return False
+    except subprocess.CalledProcessError as e:
+        print("Error generating migration:", e)
+        return False
 
-
+def migrate_migration():
+    """Applies all pending migrations if there are any."""
+    try:
+        subprocess.run(
+            ["alembic", "upgrade", "head"],
+            check=True
+        )
+        print("Migrations applied successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Error applying migrations:", e)
 
 @app.on_event("startup")
 async def startup():
     print("SERVER is booting up")
-    # Create the database tables
-    await tabel_migrations()
+
+    # Step 1: Create the database tables
+    await tabel_creation()
+
+    # if make_migration():
+    #     migrate_migration()
+
     print("SERVER is started")
 
 
 @app.get("/schema_info/")
 def get_db_schema(db: Session = Depends(get_db)):
-    Schema_info, all_table_names ,error_msg = postgreSQL_schema_info(dbname='ibmhr',
-    user='postgres',
-    password='nopassword',
-    host='localhost',
-    port=5432)
+    # Schema_info, all_table_names ,error_msg = postgreSQL_schema_info(dbname='ibmhr',
+    # user='postgres',
+    # password='nopassword',
+    # host='localhost',
+    # port=5432)
+    pass
 
-    return {"results":{ "schema_info": Schema_info,"all_table_names": all_table_names} ,"Error_Msg":error_msg}
+
 @app.post("/get-query")
 async def get_query(request: Request):
     pass
@@ -71,7 +117,10 @@ async def run_query(request: QueryRequest,  db: AsyncSession = Depends(get_db)):
     db_creds_data = db_creds_data['connection_creds']
     db_creds_data['query'] = query
 
-    results, error_msg = execute_query(**db_creds_data)
+    if db_creds.db_type == DB_type.PostgreSQL.value:
+        results, error_msg = postgresql_execute_query(**db_creds_data)
+    else:
+        results, error_msg = [], "query execution in not available for db: "+db_creds.db_type
 
     return {"results": {"query_results": results, "query": query}, "Error_Msg": error_msg}
 
@@ -97,9 +146,9 @@ async def get_all_database_info(db: AsyncSession = Depends(get_db)):
 
 
 # Function to validate the connection with the provided credentials
-def validate_connection(db_type: str, connection_creds: dict):
+def validate_connection(db_type: str, connection_creds: dict) -> tuple[bool, str]:
     try:
-        if db_type == "PostgreSQL":
+        if db_type == DB_type.PostgreSQL.value:
             # Check PostgreSQL connection as an example
             conn = psycopg2.connect(
                 dbname=connection_creds["dbname"],
@@ -109,17 +158,17 @@ def validate_connection(db_type: str, connection_creds: dict):
                 port=connection_creds["port"]
             )
             conn.close()
-            return True
+            return True,""
         else:
-            raise HTTPException(status_code=400, detail="Unsupported database type.")
+            return False, "Unsupported database type."
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Connection failed: {e}")
+        return False, f"Connection failed: {e}"
 
-async def valid_db_creds(db_creds: DatabaseCredsCreate, db: AsyncSession = Depends(get_db)):
+async def valid_db_creds(db_creds: DatabaseCredsCreate, db: AsyncSession ) -> tuple[bool,str]:
     result = await db.execute(select(DatabaseInfo).filter(DatabaseInfo.id == db_creds.database_info_id))
     db_info = result.scalars().first()
     if db_info is None:
-        raise HTTPException(status_code=404, detail="DatabaseInfo not found")
+        return False, "DatabaseInfo not found"
 
     # Validate the structure of connection_creds
     try:
@@ -129,19 +178,21 @@ async def valid_db_creds(db_creds: DatabaseCredsCreate, db: AsyncSession = Depen
         if not valid_creds or not valid_type:
             raise HTTPException(status_code=400, detail=f"Invalid Credentials JSON structure/ DB type")
 
-        return validate_connection(db_creds.db_type, db_creds.connection_creds)
+        valid, msg = validate_connection(db_creds.db_type, db_creds.connection_creds)
+
+        return valid, msg
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON structure: {e}")
+        return False, f"Invalid JSON structure: {e}"
 
 
 
 
 
 # Create DatabaseCreds
-@app.post("/database_creds/", response_model=DatabaseCredsCreate)
+@app.post("/database_creds/")
 async def create_database_creds(db_creds: DatabaseCredsCreate, db: AsyncSession = Depends(get_db)):
     # Check if DatabaseInfo exists
-    valid = await valid_db_creds(db_creds, db)
+    valid, msg = await valid_db_creds(db_creds, db)
 
     if valid:
         db_creds_db = DatabaseCreds(
@@ -154,9 +205,65 @@ async def create_database_creds(db_creds: DatabaseCredsCreate, db: AsyncSession 
             await session.commit()
             await session.refresh(db_creds_db)
 
-        return db_creds_db
+        task = asyncio.create_task(sync_schema_create_vector_DB(db_creds_db, db))
+        # Log or handle exceptions for the task
+        task.add_done_callback(
+            lambda t: print(f"Task completed with exception: {t.exception()}") if t.exception() else print(
+                "Task completed successfully")
+        )
+
+        return JSONResponse(status_code=200, content={'Result': 'Database added successfully', 'Error': ''})
     else:
-        return {'Error': 'Database is not valid'}
+        return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
+
+
+
+
+
+
+@app.post("/test-db-connection")
+async def test_db_connection(request: ConnectionStructureRequest, db_session: AsyncSession = Depends(get_db)):
+    # Retrieve the DatabaseInfo record using the provided db_id
+    result = await db_session.execute(
+        select(DatabaseInfo).filter(DatabaseInfo.id == request.db_info_id)
+    )
+    db_info = result.scalar_one_or_none()
+    if not db_info:
+        return JSONResponse(status_code=404, content={"Results": "Connection failed", "Error": "DatabaseInfo not found"})
+
+    # Verify the connection structure has the required keys and make a connection
+    valid, msg = validate_connection(db_type= db_info.db_type,connection_creds=request.connection_creds)
+
+    if valid:
+        return JSONResponse(status_code=200, content={"Results":"connection successful", "Error":""})
+    else:
+        return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
+
+
+@app.get("/change-db-schema/{db_creds_id}")
+async def change_db_schema(db_creds_id:int , db_session: AsyncSession = Depends(get_db)):
+    # Retrieve the DatabaseInfo record using the provided db_id
+    result = await db_session.execute(
+        select(DatabaseCreds).filter(DatabaseCreds.id == db_creds_id)
+    )
+    db_creds = result.scalar_one_or_none()
+    if not db_creds:
+        return JSONResponse(status_code=404,
+                            content={"Results": "Connection failed", "Error": "Databasecreds not found"})
+
+    if db_creds.db_type == DB_type.PostgreSQL.value:
+        new_hash_schema = get_current_schema_hash_postgresql(**db_creds.connection_creds)
+    else:
+        return JSONResponse(status_code=400, content={"Results": "", "Error": db_creds.db_type+" has not hashing function / under development"})
+
+    change_detect, changes = check_schema_changes(old_hashes=db_creds.table_hashes,new_hashes=new_hash_schema)
+
+    if change_detect:
+        return JSONResponse(status_code=200, content={"Results":changes, "Error":""})
+    else:
+        return JSONResponse(status_code=400, content={"Results": "no changes detected", "Error": ""})
+
+
 
 @app.get("/database_creds/", response_model=List[DatabaseCredsUpdate])
 async def get_all_database_creds(db: AsyncSession = Depends(get_db)):
@@ -185,7 +292,7 @@ async def update_database_creds( db_creds: DatabaseCredsUpdate, db: AsyncSession
 
     # Create a DatabaseCredsCreate instance from the updated data without the 'id' field
     db_creds = DatabaseCredsCreate(**db_creds_data)
-    valid = await valid_db_creds(db_creds, db)
+    valid, msg = await valid_db_creds(db_creds, db)
 
     if valid:
         existing_creds.database_info_id = db_creds.database_info_id
@@ -198,9 +305,9 @@ async def update_database_creds( db_creds: DatabaseCredsUpdate, db: AsyncSession
             await session.commit()
             await session.refresh(existing_creds)
 
-        return existing_creds
+        return JSONResponse(status_code=200, content={"Results":existing_creds,"Error": ""})
     else:
-        return {'Error': 'Database creds is not valid'}
+        return JSONResponse(status_code=400, content={"Results":"","Error": msg})
 
 
 @app.delete("/database_creds/{creds_id}")

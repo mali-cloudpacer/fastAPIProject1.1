@@ -5,6 +5,13 @@ from DB_schema import postgreSQL_schema_info
 from langchain import PromptTemplate, LLMChain
 from langchain_huggingface import HuggingFaceEndpoint
 from dotenv import load_dotenv
+from Decorators import run_in_background, run_in_background_async
+from models import DatabaseCreds, DB_type
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
+from fastapi import Depends
+
+
 
 # os.environ["LANGCHAIN_TRACING_V2"] = "true"
 # os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
@@ -19,7 +26,8 @@ from dotenv import load_dotenv
 # llm = ChatOpenAI()
 # llm.invoke("Hello, world!")
 
-def create_vector_DB():
+async def sync_schema_create_vector_DB(db_cred_obj: DatabaseCreds, db: AsyncSession = Depends(get_db)):
+    print("sync_schema_create_vector_DB started")
     model, collection = None, None
     try:
         os.environ["HUGGINGFACEHUB_API_TOKEN"] = "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"
@@ -32,15 +40,34 @@ def create_vector_DB():
 
         client = chromadb.PersistentClient(path=storage_path)
 
-        collection = client.get_or_create_collection("db_embendings")
+        sql_db_config = db_cred_obj.connection_creds
+        db_type = db_cred_obj.db_type
 
+
+        collection_name = sql_db_config['dbname']+'_'+sql_db_config['host']+'_'+"db_embeddings"
+
+        # Check if collection exists
+        if collection_name in [c.name for c in client.list_collections()]:
+            # If it exists, delete/truncate previous embeddings
+            collection = client.get_collection(collection_name)
+            client.delete_collection(collection_name)
+            collection = client.create_collection(collection_name)
+        else:
+            # If not, create a new collection
+            collection = client.create_collection(collection_name)
 
         model = SentenceTransformer('all-MiniLM-L6-v2')
-        schema_info, all_tables_names, error_msg = postgreSQL_schema_info(dbname='ibmhr',
-                user='postgres',
-                password='nopassword',
-                host='localhost',
-                port=5432)
+
+        if db_type == DB_type.PostgreSQL.value:
+            try:
+                print("postgreSQL_schema_info calling")
+                schema_info, all_tables_names, error_msg = await postgreSQL_schema_info(db_cred_obj,db)
+                print("postgreSQL_schema_info ended")
+            except Exception as e:
+                schema_info, all_tables_names, error_msg = [],"",e
+                print(e)
+        else:
+            return "DB type is not supported yet"
         embeddings = []
         chunks = []
         if schema_info:
@@ -57,7 +84,7 @@ def create_vector_DB():
                     ids=[unique_id],  # Assign a unique ID for each document
                     documents=[chunk],
                     embeddings=[embedding],
-                    metadatas=[{"table_index": idx, "source": "postgreSQl_DB"}]
+                    metadatas=[{"table_index": idx, "source": db_type}]
                 )
 
         else:
@@ -118,4 +145,5 @@ def create_sql_query(query_text, table_info):
     except Exception as e:
         print(e)
     finally:
+        print("sync_schema_create_vector_DB ended")
         return response

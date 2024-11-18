@@ -1,5 +1,9 @@
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
+from models import Base
+from logging.config import fileConfig
+from alembic import context
+from typing import AsyncGenerator
 
 
 config = {
@@ -15,15 +19,14 @@ DATABASE_URL = f"postgresql+asyncpg://{config['user']}:{config['password']}@{con
 # Set up database engine and session
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)
-Base = declarative_base()
 
-# Dependency for database session
-async def get_db():
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
 
 
-async def tabel_migrations():
+async def tabel_creation():
     async with engine.begin() as conn:
-        print("Table migration started")
+        print("Table creation started")
         await conn.run_sync(Base.metadata.create_all)
