@@ -191,8 +191,10 @@ async def valid_db_creds(db_creds: DatabaseCredsCreate, db: AsyncSession ) -> tu
 # Create DatabaseCreds
 @app.post("/database_creds/")
 async def create_database_creds(db_creds: DatabaseCredsCreate, db: AsyncSession = Depends(get_db)):
-    # Check if DatabaseInfo exists
-    valid, msg = await valid_db_creds(db_creds, db)
+    if db_creds.test_connection:
+        valid, msg = await valid_db_creds(db_creds, db)
+    else:
+        valid, msg = True, ""
 
     if valid:
         db_creds_db = DatabaseCreds(
@@ -287,7 +289,10 @@ async def update_database_creds( db_creds: DatabaseCredsUpdate, db: AsyncSession
 
     # Create a DatabaseCredsCreate instance from the updated data without the 'id' field
     db_creds = DatabaseCredsCreate(**db_creds_data)
-    valid, msg = await valid_db_creds(db_creds, db)
+    if db_creds.test_connection:
+        valid, msg = await valid_db_creds(db_creds, db)
+    else:
+        valid, msg = True, ""
 
     if valid:
         existing_creds.database_info_id = db_creds.database_info_id
@@ -300,7 +305,7 @@ async def update_database_creds( db_creds: DatabaseCredsUpdate, db: AsyncSession
             await session.commit()
             await session.refresh(existing_creds)
 
-        return JSONResponse(status_code=200, content={"Results":existing_creds,"Error": ""})
+        return JSONResponse(status_code=200, content={"Results":existing_creds.connection_creds,"Error": ""})
     else:
         return JSONResponse(status_code=400, content={"Results":"","Error": msg})
 

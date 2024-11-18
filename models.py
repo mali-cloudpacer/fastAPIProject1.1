@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import declarative_base
 from pydantic import BaseModel
 from enum import Enum
+from typing import Optional
 
 Base = declarative_base()
 
@@ -28,12 +29,14 @@ class DatabaseCredsCreate(BaseModel):
     database_info_id: int
     db_type: str
     connection_creds: dict
+    test_connection: Optional[bool] = True
 
 class DatabaseCredsUpdate(BaseModel):
     id: int
     database_info_id: int
     db_type: str
     connection_creds: dict
+    test_connection: Optional[bool] = True
 
 class QueryRequest(BaseModel):
     DatabaseCreds_id: int
