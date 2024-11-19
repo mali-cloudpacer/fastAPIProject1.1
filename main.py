@@ -18,7 +18,8 @@ import pandas as pd
 from dataclasses import asdict
 import json
 import psycopg2
-from vector_DB import sync_schema_create_vector_DB
+from vector_DB import read_schema_create_update_vector_DB, get_model_collection_vector_db, query_vector_DB, \
+    create_sql_query, create_nl_response
 from DB_schema import check_schema_changes, get_current_schema_hash_postgresql
 
 app = FastAPI()
@@ -122,7 +123,7 @@ async def run_query(request: QueryRequest,  db: AsyncSession = Depends(get_db)):
     else:
         results, error_msg = [], "query execution in not available for db: "+db_creds.db_type
 
-    return {"results": {"query_results": results, "query": query}, "Error_Msg": error_msg}
+    return {"Results": {"query_results": results, "query": query}, "Error_Msg": error_msg}
 
 
 @app.get("/")
@@ -207,9 +208,93 @@ async def create_database_creds(db_creds: DatabaseCredsCreate, db: AsyncSession 
             await session.commit()
             await session.refresh(db_creds_db)
 
-        sync_schema_create_vector_DB(db_creds_db.id)
+        read_schema_create_update_vector_DB(db_creds_db.id)
 
         return JSONResponse(status_code=200, content={'Result': 'Database added successfully', 'Error': ''})
+    else:
+        return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
+
+
+@app.post("/nl-to-sql-query/")
+async def nl_to_sql_query(request: QueryRequest, db_session: AsyncSession = Depends(get_db)):
+    nl_query = request.query
+    db_creds_id = request.DatabaseCreds_id
+    result = await db_session.execute(
+        select(DatabaseCreds).filter(DatabaseCreds.id == db_creds_id)
+    )
+    db_creds = result.scalar_one_or_none()
+    if not db_creds:
+        return JSONResponse(status_code=404,
+                            content={"Results": "Databasecreds not found", "Error": "Databasecreds not found"})
+
+    valid, msg = validate_connection(db_type=db_creds.db_type, connection_creds=db_creds.connection_creds)
+    if valid:
+        model, collection = await get_model_collection_vector_db(db_creds=db_creds)
+        if collection is None or model is None:
+            return JSONResponse(status_code=400, content={"Results": "Vector Collection not found", "Error": "Vector Collection not found"})
+
+        vector_results = query_vector_DB(query_text=nl_query,model=model,collection=collection)
+        if vector_results is None:
+            return JSONResponse(status_code=400, content={"Results": "NO result found",
+                                                          "Error": "Not result found from vector collection"})
+        llm_sql_query = create_sql_query(query_text=nl_query,table_info=vector_results)
+        if llm_sql_query is None:
+            return JSONResponse(status_code=400, content={"Results": "LLM not responding", "Error": "LLM not responding"})
+
+        cleaned_query = llm_sql_query.replace('\n', ' ').replace('\r', '').strip()
+        cleaned_query = ' '.join(cleaned_query.split())
+
+        return JSONResponse(status_code=200, content={'Result': cleaned_query, 'Error': ''})
+    else:
+        return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
+
+
+@app.post("/nl-to-nl-answer/")
+async def nl_to_nl_answer(request: QueryRequest, db_session: AsyncSession = Depends(get_db)):
+    nl_query = request.query
+    db_creds_id = request.DatabaseCreds_id
+    result = await db_session.execute(
+        select(DatabaseCreds).filter(DatabaseCreds.id == db_creds_id)
+    )
+    db_creds = result.scalar_one_or_none()
+    if not db_creds:
+        return JSONResponse(status_code=404,
+                            content={"Results": "Databasecreds not found", "Error": "Databasecreds not found"})
+
+    valid, msg = validate_connection(db_type=db_creds.db_type, connection_creds=db_creds.connection_creds)
+    if valid:
+        model, collection = await get_model_collection_vector_db(db_creds=db_creds)
+        if collection is None or model is None:
+            return JSONResponse(status_code=400, content={"Results": "Vector Collection not found", "Error": "Vector Collection not found"})
+
+        vector_results = query_vector_DB(query_text=nl_query,model=model,collection=collection)
+        if vector_results is None:
+            return JSONResponse(status_code=400, content={"Results": "NO result found",
+                                                          "Error": "Not result found from vector collection"})
+        llm_sql_query = create_sql_query(query_text=nl_query,table_info=vector_results)
+        if llm_sql_query is None:
+            return JSONResponse(status_code=400, content={"Results": "", "Error": "LLM not responding"})
+
+        cleaned_query = llm_sql_query.replace('\n', ' ').replace('\r', '').strip()
+        cleaned_query = ' '.join(cleaned_query.split())
+        if not cleaned_query.lower().startswith("select"):
+            return JSONResponse(status_code=400, content={"Results": "", "Error": "Only SELECT queries are allowed."})
+
+        db_creds_data = db_creds.connection_creds
+        db_creds_data['query'] = cleaned_query
+
+        if db_creds.db_type == DB_type.PostgreSQL.value:
+            results, error_msg = postgresql_execute_query(**db_creds_data)
+        else:
+            return JSONResponse(status_code=400, content={"Results": "", "Error": "query execution in not available for db: " + db_creds.db_type})
+
+        if results is None or error_msg != "":
+            return JSONResponse(status_code=400, content={"Results": "", "Error": error_msg})
+
+
+        llm_response = create_nl_response(query_text=nl_query,query_results=results, sql_query=cleaned_query)
+
+        return JSONResponse(status_code=200, content={"Results": {"llm_response":llm_response, "query_results": results, "query": cleaned_query}, 'Error': ''})
     else:
         return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
 
@@ -229,7 +314,7 @@ async def test_db_connection(request: ConnectionStructureRequest, db_session: As
         return JSONResponse(status_code=404, content={"Results": "Connection failed", "Error": "DatabaseInfo not found"})
 
     # Verify the connection structure has the required keys and make a connection
-    valid, msg = validate_connection(db_type= db_info.db_type,connection_creds=request.connection_creds)
+    valid, msg = validate_connection(db_type= db_info.db_type, connection_creds=request.connection_creds)
 
     if valid:
         return JSONResponse(status_code=200, content={"Results":"connection successful", "Error":""})
@@ -246,19 +331,51 @@ async def change_db_schema(db_creds_id:int , db_session: AsyncSession = Depends(
     db_creds = result.scalar_one_or_none()
     if not db_creds:
         return JSONResponse(status_code=404,
-                            content={"Results": "Connection failed", "Error": "Databasecreds not found"})
+                            content={"Results": "Databasecreds not found", "Error": "Databasecreds not found"})
 
     if db_creds.db_type == DB_type.PostgreSQL.value:
-        new_hash_schema = get_current_schema_hash_postgresql(**db_creds.connection_creds)
+        valid, msg = validate_connection(db_type=db_creds.db_type, connection_creds=db_creds.connection_creds)
+        if valid:
+            new_hash_schema = get_current_schema_hash_postgresql(**db_creds.connection_creds)
+        else:
+            return JSONResponse(status_code=400, content={"Results": "Connection failed",
+                                                          "Error": "Connection failed"})
+
     else:
         return JSONResponse(status_code=400, content={"Results": "", "Error": db_creds.db_type+" has not hashing function / under development"})
 
     change_detect, changes = check_schema_changes(old_hashes=db_creds.table_hashes,new_hashes=new_hash_schema)
 
     if change_detect:
-        return JSONResponse(status_code=200, content={"Results":changes, "Error":""})
+        return JSONResponse(status_code=200, content={"Results":{"change_detect":change_detect,"changes":changes}, "Error":""})
     else:
-        return JSONResponse(status_code=400, content={"Results": "no changes detected", "Error": ""})
+        return JSONResponse(status_code=200, content={"Results": {"change_detect":change_detect,"changes":"no changes detected"}, "Error": ""})
+
+
+@app.get("/update-db-schema/{db_creds_id}")
+async def update_db_schema_vector_db(db_creds_id:int , db_session: AsyncSession = Depends(get_db)):
+    # Retrieve the DatabaseInfo record using the provided db_id
+    result = await db_session.execute(
+        select(DatabaseCreds).filter(DatabaseCreds.id == db_creds_id)
+    )
+    db_creds = result.scalar_one_or_none()
+    if not db_creds:
+        return JSONResponse(status_code=404,
+                            content={"Results": "Connection failed", "Error": "Databasecreds not found"})
+
+    if db_creds.db_type == DB_type.PostgreSQL.value:
+        valid, msg = validate_connection(db_type=db_creds.db_type, connection_creds=db_creds.connection_creds)
+        if valid:
+            read_schema_create_update_vector_DB(db_cred_id=db_creds_id)
+            return JSONResponse(status_code=200,
+                                content={"Results": "Schema is being updated in our DB", "Error": ""})
+
+        else:
+            return JSONResponse(status_code=400, content={"Results": "Connection failed",
+                                                          "Error": "Connection failed"})
+
+    else:
+        return JSONResponse(status_code=400, content={"Results": "", "Error": db_creds.db_type+" has not hashing function / under development"})
 
 
 
@@ -304,6 +421,8 @@ async def update_database_creds( db_creds: DatabaseCredsUpdate, db: AsyncSession
             session.add(existing_creds)
             await session.commit()
             await session.refresh(existing_creds)
+
+        read_schema_create_update_vector_DB(db_cred_id=existing_creds.id)
 
         return JSONResponse(status_code=200, content={"Results":existing_creds.connection_creds,"Error": ""})
     else:

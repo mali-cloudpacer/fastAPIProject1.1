@@ -2,7 +2,8 @@ from langchain_openai import ChatOpenAI
 import os, chromadb
 from sentence_transformers import SentenceTransformer
 from DB_schema import postgreSQL_schema_info
-from langchain import PromptTemplate, LLMChain
+from langchain import LLMChain
+from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEndpoint
 from dotenv import load_dotenv
 from Decorators import run_in_background, run_in_background_async
@@ -27,12 +28,10 @@ from sqlalchemy.orm import Session
 # llm = ChatOpenAI()
 # llm.invoke("Hello, world!")
 @run_in_background
-def sync_schema_create_vector_DB(db_cred_id: int):
-    print("sync_schema_create_vector_DB started")
+def read_schema_create_update_vector_DB(db_cred_id: int):
+    print("sync_schema_create_vector_DB function started")
     db: Session = get_db_sync()
     db_cred_obj = db.query(DatabaseCreds).filter(DatabaseCreds.id == db_cred_id).first()
-
-    model, collection = None, None
     try:
         os.environ["HUGGINGFACEHUB_API_TOKEN"] = "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"
 
@@ -97,21 +96,53 @@ def sync_schema_create_vector_DB(db_cred_id: int):
     except Exception as e:
         print(e)
     finally:
+        print("read_schema_create_update_vector_DB function ended")
+
+async def get_model_collection_vector_db(db_creds:DatabaseCreds):
+    model, collection = None,None
+    try:
+        os.environ["HUGGINGFACEHUB_API_TOKEN"] = "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"
+
+        load_dotenv('.env.local')
+
+        storage_path = os.getenv('VECTOR_STORAGE_PATH')
+        if not storage_path:
+            raise ValueError('VECTOR_STORAGE_PATH environment variable is not set')
+
+        client = chromadb.PersistentClient(path=storage_path)
+
+        sql_db_config = db_creds.connection_creds
+        db_type = db_creds.db_type
+
+
+        collection_name = sql_db_config['dbname']+'_'+sql_db_config['host']+'_'+"db_embeddings"
+
+        # Check if collection exists
+        if collection_name in [c.name for c in client.list_collections()]:
+            collection = client.get_collection(collection_name)
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+        else:
+            print("Collection not for the DB: DatabaseCreds_id "+str(db_creds.id))
+
+    except Exception as e:
+        print("Exception in get_model_collection_vector_db "+str(e))
+    finally:
         return model, collection
 
 
-def query_vector_DB(query_text, model, collection):
+
+def query_vector_DB(query_text, model, collection, num_results=3):
     result = None
     try:
         query_embedding = model.encode(query_text)
 
         # Retrieve similar documents
-        results = collection.query(query_embeddings=[query_embedding], n_results=5)
+        results = collection.query(query_embeddings=[query_embedding], n_results=num_results)
 
         for result in results['documents']:
             print(result)
     except Exception as e:
-        print(e)
+        print("Exception in query_vector_DB functoin: "+str(e))
     finally:
         return result
 
@@ -126,7 +157,7 @@ def create_sql_query(query_text, table_info):
         question = query_text
         context = str(table_info)
         # Define a template that can format retrieved context and structure an answer based on it
-        template = f"""
+        template = """
             You are given a question and table information. Generate only the SQL query if it can be constructed based on the table information provided. If the table is not relevant to the question or if no query can be constructed, respond with "None" only. 
 
             Question: {question}
@@ -140,14 +171,57 @@ def create_sql_query(query_text, table_info):
         # Define input variables for RAG model to retrieve relevant context and generate answer
         prompt = PromptTemplate(template=template, input_variables=["question", "context"])
         print(prompt)
-        llm_chain = LLMChain(llm=llm, prompt=prompt)
+        llm_chain = LLMChain(llm=llm, prompt=prompt, name="create_sql_response_chain")
         response = llm_chain.invoke({
             "question": question,
             "context": context
         })
-        print(response.get('text', "NO key"))
+        response = response.get('text', "NO text response from LLM")
+        print(response)
     except Exception as e:
-        print(e)
+        print("Exception in the create_sql_query: "+str(e))
     finally:
-        print("sync_schema_create_vector_DB ended")
+        print("create_sql_query ended")
+        print("llm response: "+str(response))
+        return response
+
+def create_nl_response(query_text, query_results, sql_query):
+    response = None
+    try:
+        repo_id = "mistralai/Mistral-7B-Instruct-v0.2"
+        # repo_id="mistralai/Mistral-7B-Instruct-v0.3"
+        llm = HuggingFaceEndpoint(repo_id=repo_id, max_length=264, temperature=0.7,
+                                  token="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")
+
+        question = query_text
+        context = f"(sql_query: {sql_query}), (query_results: {query_results})"
+
+
+        # Define a template that can format retrieved context and structure an answer based on it
+        template = """
+                    You are given a question, sql_query and query_results. Give me information in Natural Language based on the query_results table information. If the table is not relevant to the question , respond with "Question and Data are not Matching" only.
+
+                    Question: {question}
+
+                    Context:{context}
+
+
+                    Answer:
+                    """
+
+        # Define input variables for RAG model to retrieve relevant context and generate answer
+        prompt = PromptTemplate(template=template, input_variables=["question", "context"])
+        print(prompt)
+        llm_chain = LLMChain(llm=llm, prompt=prompt, name="create_nl_response_chain")
+        response = llm_chain.invoke({
+            "question": question,
+            "context": context
+        })
+        response = response.get('text', "NO text response from LLM")
+        print(response)
+    except Exception as e:
+        print("Exception in the create_nl_response: "+str(e))
+    finally:
+        print("create_nl_response ended")
+        print("llm response: "+str(response))
         return response
