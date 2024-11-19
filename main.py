@@ -83,14 +83,33 @@ async def startup():
     print("SERVER is started")
 
 
-@app.get("/schema_info/")
-def get_db_schema(db: Session = Depends(get_db)):
-    # Schema_info, all_table_names ,error_msg = postgreSQL_schema_info(dbname='ibmhr',
-    # user='postgres',
-    # password='nopassword',
-    # host='localhost',
-    # port=5432)
-    pass
+@app.get("/schema_info/{db_creds_id}")
+async def get_db_schema(db_creds_id:int ,db_session: Session = Depends(get_db)):
+    result = await db_session.execute(
+        select(DatabaseCreds).filter(DatabaseCreds.id == db_creds_id)
+    )
+    db_creds = result.scalar_one_or_none()
+    if not db_creds:
+        return JSONResponse(status_code=404,
+                            content={"Results": "Databasecreds not found", "Error": "Databasecreds not found"})
+
+    valid, msg = validate_connection(db_type=db_creds.db_type, connection_creds=db_creds.connection_creds)
+    if valid:
+        Schema_info, all_table_names, error_msg = postgreSQL_schema_info(db_cred_id=db_creds_id, save_table_hash=False)
+        if error_msg != "":
+            return JSONResponse(status_code=400, content={"Results": "", "Error": error_msg})
+        else:
+            return JSONResponse(status_code=200,
+            content={"Results": {
+                "schema_info":Schema_info,
+                "table_names":all_table_names
+            },
+                "Error": ""})
+    else:
+        return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
+
+
+
 
 
 @app.post("/get-query")

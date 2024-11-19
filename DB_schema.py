@@ -11,7 +11,7 @@ from sqlalchemy.dialects.oracle.dictionary import all_tables
 from sqlalchemy.orm import Session
 
 
-def postgreSQL_schema_info(db_cred_id: int) -> tuple[list, str, str]:
+def postgreSQL_schema_info(db_cred_id: int, save_table_hash:bool=True) -> tuple[list, str, str]:
     db: Session = get_db_sync()
     db_cred_obj = db.query(DatabaseCreds).filter(DatabaseCreds.id == db_cred_id).first()
     db_config = db_cred_obj.connection_creds
@@ -83,11 +83,11 @@ def postgreSQL_schema_info(db_cred_id: int) -> tuple[list, str, str]:
                     table_info +=  f"{str(column['Default'])}"
             table_info += "\n"
             Db_info.append(table_info)
-
-        db_cred_obj.table_hashes = table_hashes
-        db.add(db_cred_obj)
-        db.commit()
-        db.refresh(db_cred_obj)
+        if save_table_hash:
+            db_cred_obj.table_hashes = table_hashes
+            db.add(db_cred_obj)
+            db.commit()
+            db.refresh(db_cred_obj)
 
 
 
