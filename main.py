@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from starlette.responses import Response
 from stem.interpreter.help import response
 from fastapi.responses import JSONResponse
+import orjson, re
 
 from models import (DatabaseInfo, DatabaseInfoResponse, DatabaseCredsCreate,
                     DatabaseCreds, DatabaseCredsUpdate, QueryRequest, DB_type, ConnectionStructureRequest)
@@ -21,6 +22,7 @@ import psycopg2
 from vector_DB import read_schema_create_update_vector_DB, get_model_collection_vector_db, query_vector_DB, \
     create_sql_query, create_nl_response
 from DB_schema import check_schema_changes, get_current_schema_hash_postgresql
+from common_logics import format_llm_response
 
 app = FastAPI()
 
@@ -296,8 +298,12 @@ async def nl_to_nl_answer(request: QueryRequest, db_session: AsyncSession = Depe
 
         cleaned_query = llm_sql_query.replace('\n', ' ').replace('\r', '').strip()
         cleaned_query = ' '.join(cleaned_query.split())
-        if not cleaned_query.lower().startswith("select"):
+        if not re.search(r'^\s*(select|with|[\(])', cleaned_query, re.IGNORECASE):
             return JSONResponse(status_code=400, content={"Results": "", "Error": "Only SELECT queries are allowed."})
+
+        forbidden_keywords = r'\b(insert|update|delete|drop|truncate|alter|create)\b'
+        if re.search(forbidden_keywords, cleaned_query, re.IGNORECASE):
+            return JSONResponse(status_code=400, content={"Results": "", "Error": "Query contains forbidden operations such as INSERT, UPDATE, DELETE, etc."})
 
         db_creds_data = db_creds.connection_creds
         db_creds_data['query'] = cleaned_query
@@ -309,11 +315,13 @@ async def nl_to_nl_answer(request: QueryRequest, db_session: AsyncSession = Depe
 
         if results is None or error_msg != "":
             return JSONResponse(status_code=400, content={"Results": "", "Error": error_msg})
-
+        results = orjson.dumps(results, default=str).decode("utf-8")
 
         llm_response = create_nl_response(query_text=nl_query,query_results=results, sql_query=cleaned_query)
 
-        return JSONResponse(status_code=200, content={"Results": {"llm_response":llm_response, "query_results": results, "query": cleaned_query}, 'Error': ''})
+        llm_response = format_llm_response(llm_response)
+
+        return JSONResponse(status_code=200, content={"Results": {"llm_response":str(llm_response), "query_results": results, "query": cleaned_query}, 'Error': ''})
     else:
         return JSONResponse(status_code=400, content={"Results": "Connection failed", "Error": msg})
 

@@ -190,7 +190,7 @@ def create_nl_response(query_text, query_results, sql_query):
     try:
         repo_id = "mistralai/Mistral-7B-Instruct-v0.2"
         # repo_id="mistralai/Mistral-7B-Instruct-v0.3"
-        llm = HuggingFaceEndpoint(repo_id=repo_id, max_length=264, temperature=0.7,
+        llm = HuggingFaceEndpoint(repo_id=repo_id, max_length=512, temperature=0.7,
                                   token="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")
 
         question = query_text
